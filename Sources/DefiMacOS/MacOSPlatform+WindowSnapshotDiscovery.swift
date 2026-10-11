@@ -185,8 +185,15 @@ extension SnapshotEngine {
         }
         return true
       }
+      let refreshesApplicationInventory = applicationInventoryRefreshIsRequired(
+        hasCompletedSnapshot: hasCompletedWindowSnapshot,
+        topologyRequiresFullSnapshot: capturedTopologyRequiresFullSnapshot,
+        forced: forceApplicationInventoryRefresh
+      )
       var processIDsToRefresh = incrementalProcessIDs
-      if var requestedProcessIDs = processIDsToRefresh {
+      // An inventory refresh reads every running app below. Serving one from
+      // cache first would append its windows a second time.
+      if var requestedProcessIDs = processIDsToRefresh, !refreshesApplicationInventory {
         for processID in previousApplications.keys where !requestedProcessIDs.contains(processID) {
           if !reuseCachedProcess(processID) {
             requestedProcessIDs.insert(processID)
@@ -195,24 +202,19 @@ extension SnapshotEngine {
         processIDsToRefresh = requestedProcessIDs
       }
 
-      let refreshesApplicationInventory = applicationInventoryRefreshIsRequired(
-        hasCompletedSnapshot: hasCompletedWindowSnapshot,
-        topologyRequiresFullSnapshot: capturedTopologyRequiresFullSnapshot,
-        forced: forceApplicationInventoryRefresh
-      )
       let observedCGWindows = publicCGWindows() ?? []
       let inventoryStartedAt = ProcessInfo.processInfo.systemUptime
-      let workspaceApplications = refreshesApplicationInventory
-        ? NSWorkspace.shared.runningApplications : []
+      let workspaceApplications: [(processID: pid_t, application: NSRunningApplication?)] =
+        !refreshesApplicationInventory ? []
+        : discoveryMeasurementAccess?.runningProcessIDs?().map { ($0, nil) }
+          ?? NSWorkspace.shared.runningApplications.map { ($0.processIdentifier, $0) }
       var fallbackApplicationIDs: [pid_t: String] = [:]
       if refreshesApplicationInventory {
         applicationInventorySnapshotCount += 1
       }
       let baseApplications: [(processID: pid_t, application: NSRunningApplication?)]
       if refreshesApplicationInventory {
-        baseApplications = workspaceApplications.map {
-          ($0.processIdentifier, $0)
-        }
+        baseApplications = workspaceApplications
       } else if let processIDsToRefresh {
         baseApplications = processIDsToRefresh.sorted().map {
           ($0, previousApplications[$0] == nil
@@ -223,7 +225,7 @@ extension SnapshotEngine {
         baseApplications = previousApplications.keys.sorted().map { ($0, nil) }
       }
       let knownProcessIDs = refreshesApplicationInventory
-        ? Set(workspaceApplications.map(\.processIdentifier))
+        ? Set(workspaceApplications.map(\.processID))
         : Set(previousApplications.keys)
       let missingProcessIDs = missingApplicationProcessIDs(
         cgWindows: observedCGWindows,
@@ -233,8 +235,8 @@ extension SnapshotEngine {
       for processID in missingProcessIDs
       where refreshesApplicationInventory || (processIDsToRefresh?.contains(processID) ?? true) {
         let processApplication = workspaceApplications.first(where: {
-          $0.processIdentifier == processID
-        }) ?? NSRunningApplication(processIdentifier: processID)
+          $0.processID == processID
+        })?.application ?? NSRunningApplication(processIdentifier: processID)
         let bundleID = processApplication == nil ? appBundleIdentifier(processID: processID) : nil
         guard missingApplicationFallbackIsEligible(
           isTerminated: processApplication?.isTerminated ?? false,
