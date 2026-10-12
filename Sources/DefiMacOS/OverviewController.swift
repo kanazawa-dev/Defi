@@ -192,6 +192,10 @@ public final class OverviewController: NSObject {
   private var surfacePreparationPending = false
   private var previewTask: Task<Void, Never>?
   private var desktopCaptureRetryTask: Task<Void, Never>?
+  // Each timed-out native capture is abandoned, not cancelled, so retries are bounded per session.
+  private static let desktopCaptureRetryLimit = 5
+  private var desktopCaptureRetryCount = 0
+  private var desktopCaptureRetryGeneration: UInt64 = 0
   private var previewCache: [WindowID: NSImage] = [:]
   private let rememberedPreviews = OverviewPreviewCache()
   private var idlePreviewTask: Task<Void, Never>?
@@ -1315,7 +1319,10 @@ public final class OverviewController: NSObject {
       selection: selection).filter {
       !attemptedPreviewWindowIDs.contains($0.windowID)
     }
-    let hasPendingDesktopCapture = panels.keys.contains {
+    // Panel updates must not bypass the retry cap once desktop captures keep failing.
+    // Decided here, before the batch task yields, so the retry that was granted still captures.
+    let includesDesktops = !desktopCaptureRetriesExhausted(generation: sessionGeneration)
+    let hasPendingDesktopCapture = includesDesktops && panels.keys.contains {
       !capturedDesktopMonitorIDs.contains($0)
     }
     guard overviewCaptureBatchNeeded(
@@ -1331,6 +1338,7 @@ public final class OverviewController: NSObject {
       await Task.yield()
       await self?.capturePreviewBatch(
         requests,
+        includesDesktops: includesDesktops,
         generation: generation
       )
     }
@@ -1338,6 +1346,7 @@ public final class OverviewController: NSObject {
 
   private func capturePreviewBatch(
     _ requests: [OverviewPreviewRequest],
+    includesDesktops: Bool,
     generation: UInt64
   ) async {
     guard windowPreviewsEnabled, isOpen, generation == sessionGeneration,
@@ -1378,7 +1387,7 @@ public final class OverviewController: NSObject {
       return
     }
 
-    let desktopRequests = desktopCaptureRequests()
+    let desktopRequests = includesDesktops ? desktopCaptureRequests() : []
     let results = await captureOverviewImages(
       previews: requests,
       desktops: desktopRequests,
@@ -1481,8 +1490,18 @@ public final class OverviewController: NSObject {
     presentationChanged()
   }
 
+  private func desktopCaptureRetriesExhausted(generation: UInt64) -> Bool {
+    desktopCaptureRetryGeneration == generation
+      && desktopCaptureRetryCount >= Self.desktopCaptureRetryLimit
+  }
+
   private func scheduleDesktopCaptureRetry(generation: UInt64) {
     cancelDesktopCaptureRetry()
+    if desktopCaptureRetryGeneration != generation {
+      desktopCaptureRetryGeneration = generation
+      desktopCaptureRetryCount = 0
+    }
+    guard desktopCaptureRetryCount < Self.desktopCaptureRetryLimit else { return }
     desktopCaptureRetryTask = Task { @MainActor [weak self] in
       do {
         try await Task.sleep(for: .seconds(1))
@@ -1494,7 +1513,9 @@ public final class OverviewController: NSObject {
       guard self.windowPreviewsEnabled, self.isOpen,
         generation == self.sessionGeneration
       else { return }
+      // Counted after the batch is requested, so the last allowed retry is not blocked by its own count.
       self.schedulePreviewsIfNeeded()
+      self.desktopCaptureRetryCount += 1
     }
   }
 
