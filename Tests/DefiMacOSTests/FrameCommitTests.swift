@@ -678,10 +678,30 @@ struct FrameCommitTests {
     coordinator.recordObservedBorderFrame(before, windowID: id, sampledAt: 0)
     #expect(coordinator.latestBorderFrame(for: id)?.x == (available ? 900 : 480))
     let observed = Rect(x: 485, y: 40, width: 800, height: 700)
+    // Right after an unverified write, a disagreeing sample may be WindowServer lag.
     coordinator.recordObservedBorderFrame(
       observed, windowID: id, sampledAt: ProcessInfo.processInfo.systemUptime
     )
+    #expect(coordinator.latestBorderFrame(for: id)?.x == (available ? 900 : 485))
+    coordinator.recordObservedBorderFrame(
+      observed, windowID: id, sampledAt: ProcessInfo.processInfo.systemUptime + 0.25
+    )
     #expect(coordinator.latestBorderFrame(for: id) == observed)
+    // Column moves and the final sample keep the written point too.
+    guard available else { return }
+    let layoutFrame = QueuedPositionFrame(
+      generation: 1, source: "command-layout-animation", writes: [id: write],
+      animatedWindowIDs: [id], animationDuration: 0.15, refreshRateHz: 120,
+      displayIDs: [], initialProgressVelocity: 0, stagesVisibleBeforeParking: false,
+      completion: nil
+    )
+    _ = coordinator.applyBatch(
+      ProcessWriteBatch(processID: 42, writes: [(key: id, value: write)]),
+      frame: layoutFrame, progress: 1, intermediate: false,
+      stagingReentry: false, recordFinalSuccess: true
+    )
+    #expect(reads.withLock { $0 } == 0)
+    #expect(coordinator.completedPosition(for: id)?.x == 100)
   }
 
   @Test
@@ -1178,6 +1198,22 @@ struct FrameCommitTests {
     #expect(reference?.x == Double(actual.x))
     #expect(frameWriteIntent(reference: reference!, target: target, positionsOnly: true).position)
     #expect(reference?.width == target.width)
+  }
+
+  @Test
+  func refusedSizeDoesNotAnimateSizeDuringColumnMove() {
+    let refused = Rect(x: 20, y: 54, width: 533, height: 1136)
+    let previous = Rect(x: 20, y: 54, width: 533, height: 1320)
+    let target = Rect(x: 573, y: 54, width: 533, height: 1320)
+    let reference = frameApplicationReference(
+      pendingCorrection: refused, settlingReference: nil, completedPosition: nil,
+      previousTarget: previous, prefersCompletedPosition: false, nativeReference: nil)
+    #expect(reference == refused)
+    #expect(frameWriteIntent(reference: reference!, target: target, positionsOnly: false).size)
+    #expect(!targetSizeChanged(previous: previous, target: target))
+    #expect(targetSizeChanged(
+      previous: Rect(x: 20, y: 54, width: 400, height: 1320), target: target))
+    #expect(targetSizeChanged(previous: nil, target: target))
   }
 
   @Test

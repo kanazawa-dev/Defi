@@ -74,18 +74,6 @@ extension MacOSPlatform {
     let previousRibbonFrames = previousLogicalRibbonFrames
     previousLogicalRibbonFrames = Dictionary(uniqueKeysWithValues:
       ribbonFrames.map { ($0.windowID, $0.frame) })
-    if experimentalSurfaceRibbonEnabled && source != "command-animation" {
-      snapshotEngine.onMain { _ in
-        ExperimentalRibbonRenderer.shared.supersedeIfTargetsChanged(assignments)
-      }
-    }
-    let usesSurfaceRibbon = experimentalSurfaceRibbonEnabled && source == "command-animation" && positionsOnly
-      && snapshotEngine.onMain { platform in
-        ExperimentalRibbonRenderer.shared.begin(assignments: assignments, ribbonFrames: ribbonFrames,
-          duration: animationDuration,
-          borderStyle: platform.borderStyle, selectedWindowID: platform.borderSelectedWindowID)
-      }
-    let animationDuration = usesSurfaceRibbon ? 0 : animationDuration
     frameSubmissionGeneration &+= 1
     let submissionGeneration = frameSubmissionGeneration
     let skippedWindowIDs = requestedSkippedWindowIDs.union(
@@ -375,6 +363,10 @@ extension MacOSPlatform {
       let parkedRibbonTarget = ribbonAnimationTarget(
         logical: ribbonTargets[assignment.windowID], from: startFrame,
         isParked: isParked, monitorFrames: lastMonitorFrames)
+      let animatesSizeChange =
+        animateSizeChanges && intent?.size == true
+        && targetSizeChanged(
+          previous: previousTargetFrames[assignment.windowID], target: assignment.frame)
       let wantsFrameAnimation =
         animationDuration > 0
         && (!isParked || parkedRibbonTarget != nil)
@@ -382,12 +374,8 @@ extension MacOSPlatform {
           from: startFrame,
           to: parkedRibbonTarget ?? assignment.frame
         )
-        && (intent?.position == true || parkedRibbonTarget != nil
-          || (animateSizeChanges && intent?.size == true))
-      let animatesSize =
-        wantsFrameAnimation
-        && animateSizeChanges
-        && intent?.size == true
+        && (intent?.position == true || parkedRibbonTarget != nil || animatesSizeChange)
+      let animatesSize = wantsFrameAnimation && animatesSizeChange
       let write = AsyncPositionWrite(
         element: element,
         application: application,
@@ -490,6 +478,10 @@ extension MacOSPlatform {
           }
           if refreshesBordersAfterCommit {
             self.refreshWindowBorders()
+            // Once recent writes stop masking native samples, catch any clamp.
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+              self?.presentRefreshWindowBorders()
+            }
           }
           self.consumeAcceptedFrames(result.acceptedObservations, handler: acceptedFrameHandler)
           if let cursorWarpWindowIDAfterCommit,

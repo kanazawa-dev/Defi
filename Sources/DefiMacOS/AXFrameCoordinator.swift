@@ -499,7 +499,8 @@ final class AXFrameCoordinator: @unchecked Sendable {
     guard sampledAt >= max(
       borderGeometries[windowID]?.sampledAt ?? -.infinity,
       borderGeometryWrittenAt[windowID] ?? -.infinity
-    ) else { return }
+    ), !observationContradictsRecentWriteLocked(frame, windowID: windowID, sampledAt: sampledAt)
+    else { return }
     borderGeometries[windowID] = (frame, sampledAt)
   }
 
@@ -507,6 +508,25 @@ final class AXFrameCoordinator: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     return borderGeometries[windowID]?.frame
+  }
+
+  // Display-only: never feed this back into observed frames.
+  func latestDisplayedBorderFrame(for windowID: WindowID) -> Rect? {
+    lock.lock()
+    defer { lock.unlock() }
+    let written = completedPositions[windowID].flatMap { point in
+      borderGeometryWrittenAt[windowID].map { (point, completedSizes[windowID], $0) }
+    }
+    return displayedWindowBorderFrame(observed: borderGeometries[windowID], written: written)
+  }
+
+  /// WindowServer can still report a slow app's previous position for a few
+  /// frames after its AX write returns; a native sample this soon is not proof.
+  func borderWriteIsRecent(for windowID: WindowID, within seconds: TimeInterval = 0.2) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return (borderGeometryWrittenAt[windowID] ?? -.infinity)
+      > ProcessInfo.processInfo.systemUptime - seconds
   }
 
   func retainBorderGeometry(for windowIDs: Set<WindowID>) {

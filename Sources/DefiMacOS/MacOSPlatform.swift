@@ -10,13 +10,6 @@ import OSLog
 
 @NavigationActor
 public final class MacOSPlatform {
-  public var experimentalSurfaceRibbonEnabled = false {
-    didSet {
-      if oldValue && !experimentalSurfaceRibbonEnabled {
-        DispatchQueue.main.async { ExperimentalRibbonRenderer.shared.cancel() }
-      }
-    }
-  }
   var previousLogicalRibbonFrames: [WindowID: Rect] = [:]
   nonisolated let snapshotEngine: SnapshotEngine
 
@@ -148,6 +141,8 @@ public final class MacOSPlatform {
 
 
   @MainActor lazy var borderManager = WindowBorderManager()
+  @MainActor lazy var borderSync = makeWindowBorderSync()
+  @MainActor lazy var borderStackingSettle = makeWindowBorderStackingSettle()
   @MainActor lazy var nativeFullscreenPlaceholderManager = NativeFullscreenPlaceholderManager()
   nonisolated let borderBoundsProvider: WindowServerBoundsProvider
   nonisolated var targetFrames: [WindowID: Rect] {
@@ -432,6 +427,7 @@ public final class MacOSPlatform {
   public var isPrivateWindowConstraintLookupAvailable: Bool { presentationStatus.constraintsAvailable }
   public var successfulPrivateWindowConstraintLookupCount: Int { presentationStatus.constraintsSuccesses }
   public var privateWindowConstraintLookupFallbackCount: Int { presentationStatus.constraintsFallbacks }
+  public var windowBorderSyncStatus: String { presentationStatus.borderSync }
   @MainActor var presentedNativeFullscreenWindowIDs = Set<WindowID>()
   @MainActor var presentedActiveNativeFullscreenWindowIDs = Set<WindowID>()
   @MainActor var presentedSelectedWindowID: WindowID?
@@ -486,7 +482,6 @@ public final class MacOSPlatform {
     activeNativeFullscreenWindowIDs = activeWindowIDs.intersection(windowIDs)
     let now = ProcessInfo.processInfo.systemUptime
     if !entered.isEmpty {
-      DispatchQueue.main.async { ExperimentalRibbonRenderer.shared.cancel() }
       frameSubmissionGeneration &+= 1
       if entered.contains(where: frameCoordinator.isBusy(for:)) {
         frameCoordinator.invalidate(reason: "native-fullscreen")
