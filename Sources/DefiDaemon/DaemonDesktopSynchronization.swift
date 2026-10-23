@@ -562,6 +562,18 @@ extension Daemon {
           latestCommandInputTimestamp: latestFocusIntentTimestamp
         )
         && !preservesWorkspaceAfterRemoval
+        && !nativeActivationLacksHumanIntent(
+          applicationActivation: activationTimestamp != nil,
+          switchesWorkspace: state.monitors.contains { monitor in
+            monitor.workspaces.contains { workspace in
+              workspace.id != monitor.activeWorkspace
+                && (workspace.columns.contains { $0.windows.contains(focusedWindowID) }
+                  || workspace.floatingWindows.contains(focusedWindowID))
+            }
+          },
+          latestUserInputTimestamp: latestUserInputTimestamp,
+          latestCommandInputTimestamp: latestFocusIntentTimestamp
+        )
       let selectionChanged = nativeFocusChangesSelection(
         focusedWindowID,
         activeMonitorID: activeMonitorID,
@@ -666,6 +678,8 @@ extension Daemon {
     )
 
     var mouseReordered = false
+    // A released tiled window glides from where it was dropped into its slot.
+    var animatesMouseDrop = false
     if !displayGeometryChanged && mouseResizeGestureActive {
       let physicalMonitorFrames = Dictionary(uniqueKeysWithValues: latestMonitors.map {
         ($0.id, $0.physicalFrame)
@@ -709,7 +723,40 @@ extension Daemon {
       )
       if snapshot.leftMouseButtonDown {
         activelyResizedWindowID = gestureWindowID
-        if let gestureWindowID,
+        if let gestureWindowID, state.windows[gestureWindowID]?.floating == false,
+          let actualFrame, let mouseGestureInitialFrame
+        {
+          if mouseFrameWasTranslated(from: mouseGestureInitialFrame, to: actualFrame) {
+            platform.carryWindowProxy(gestureWindowID, stretches: false)
+          } else if mouseFrameWasResized(from: mouseGestureInitialFrame, to: actualFrame) {
+            platform.carryWindowProxy(gestureWindowID, stretches: true)
+          }
+        }
+        // With the overlay, a drag never reorders for real: the overlay shows the
+        // layout the drop would produce at the pointer, and the drop applies it.
+        if platform.windowProxiesEnabled, let gestureWindowID,
+          state.windows[gestureWindowID]?.floating == false
+        {
+          // A click or a resize is no drop: only a moved window previews one.
+          let moved = actualFrame.flatMap { actual in
+            mouseGestureInitialFrame.map { mouseFrameWasTranslated(from: $0, to: actual) }
+          } ?? false
+          let target = moved ? CGEvent(source: nil).flatMap { event in
+            mouseDropTarget(gestureWindowID,
+              pointer: (Double(event.location.x), Double(event.location.y)),
+              state: state, viewports: viewportsByMonitor)
+          } : nil
+          if target != proxyPreviewTarget {
+            proxyPreviewTarget = target
+            var preview = state
+            if let target {
+              applyMouseDrop(gestureWindowID, target, state: &preview, viewports: viewportsByMonitor)
+            }
+            platform.presentWindowProxyPreview(
+              mouseDropPreviewFrames(around: gestureWindowID, in: preview, viewports: viewportsByMonitor),
+              heldWindowID: gestureWindowID)
+          }
+        } else if let gestureWindowID,
           let actualFrame,
           let mouseGestureInitialFrame,
           mouseFrameWasTranslated(
@@ -730,7 +777,19 @@ extension Daemon {
           )
         }
       } else {
-        if let gestureWindowID,
+        let previewed = proxyPreviewTarget != nil
+        proxyPreviewTarget = nil
+        var droppedOnOverlay = false
+        if previewed, let gestureWindowID,
+          let event = CGEvent(source: nil),
+          let target = mouseDropTarget(gestureWindowID,
+            pointer: (Double(event.location.x), Double(event.location.y)),
+            state: state, viewports: viewportsByMonitor)
+        {
+          mouseReordered = applyMouseDrop(gestureWindowID, target, state: &state, viewports: viewportsByMonitor)
+          droppedOnOverlay = true
+          platform.recordPerformanceTrace("mouse-drop window=\(gestureWindowID.rawValue) target=\(target)")
+        } else if let gestureWindowID,
           let actualFrame,
           let mouseGestureInitialFrame,
           reorderTiledWindowAfterCompletedMouseDrag(
@@ -761,19 +820,35 @@ extension Daemon {
           let actualFrame
         {
           let now = ProcessInfo.processInfo.systemUptime
-          mouseGestureSettlement = MouseGestureSettlement(
-            generation: mouseGestureGeneration,
-            windowID: gestureWindowID,
-            initialFrame: mouseGestureInitialFrame,
-            releasedFrame: actualFrame,
-            now: now,
-            maximumDuration: mouseGestureSettlementMaximumDuration(
-              latencySensitive: platform.latencySensitiveWindowIDs.contains(
-                gestureWindowID
+          animatesMouseDrop = platform.windowProxiesEnabled && animationsEnabled
+            && config.animation.durationMS > 0 && state.windows[gestureWindowID]?.floating == false
+            && (mouseFrameWasTranslated(from: mouseGestureInitialFrame, to: actualFrame)
+              || mouseFrameWasResized(from: mouseGestureInitialFrame, to: actualFrame))
+          if animatesMouseDrop {
+            // The overlay carries the window into its slot, so Defi writes the final
+            // frame now instead of waiting for the native window to settle where it
+            // was released (it was skipped until then and stayed there).
+            proxyDroppedWindowID = gestureWindowID
+            finishMouseGestureTracking()
+          } else if droppedOnOverlay {
+            // The drop already decided the layout: settling against the released native
+            // frame would reorder the window a second time.
+            finishMouseGestureTracking()
+          } else {
+            mouseGestureSettlement = MouseGestureSettlement(
+              generation: mouseGestureGeneration,
+              windowID: gestureWindowID,
+              initialFrame: mouseGestureInitialFrame,
+              releasedFrame: actualFrame,
+              now: now,
+              maximumDuration: mouseGestureSettlementMaximumDuration(
+                latencySensitive: platform.latencySensitiveWindowIDs.contains(
+                  gestureWindowID
+                )
               )
             )
-          )
-          activelyResizedWindowID = gestureWindowID
+            activelyResizedWindowID = gestureWindowID
+          }
         } else if let settlement = mouseGestureSettlement,
           settlement.generation == mouseGestureGeneration,
           settlement.windowID == gestureWindowID,
@@ -821,6 +896,9 @@ extension Daemon {
       )
     }
     synchronizeScrollOffsets(state: &state, viewports: viewportsByMonitor)
+    // An overlay drop settles natives out of sight: release the scroll anchor now so
+    // the drop and the scroll to the focused window are one motion.
+    if animatesMouseDrop { mouseGestureScrollAnchor = nil }
     if let mouseGestureScrollAnchor {
       restoreWorkspaceScroll(mouseGestureScrollAnchor, state: &state)
     }
@@ -850,6 +928,12 @@ extension Daemon {
     let animatesNativeFocus = nativeAnimationMonitorID != nil
       && nativeFocusRequiresMovement
       && animationsEnabled && config.animation.durationMS > 0
+    // Opened and closed windows reflow their neighbours on the proxy overlay only;
+    // native lifecycle reflow stays immediate.
+    let animatesLifecycle = !animatesNativeFocus && !animatesMouseReorder
+      && !nativelyActivatedWorkspace && !snapshot.leftMouseButtonDown
+      && platform.windowProxiesEnabled && animationsEnabled && config.animation.durationMS > 0
+      && Set(state.windows.keys) != previouslyManagedWindowIDs
     let animatesFocusOrReorder = animatesNativeFocus || animatesMouseReorder
     snapScrollOffsetsToTargets()
     if animatesMouseReorder { mouseReorderAnimationActive = true }
@@ -905,7 +989,7 @@ extension Daemon {
         asynchronousPositions: true,
         updateVisibility: true,
         positionTimeoutSeconds: 0.05,
-        animationDuration: animatesFocusOrReorder
+        animationDuration: animatesFocusOrReorder || animatesLifecycle || animatesMouseDrop
           ? TimeInterval(config.animation.durationMS) / 1_000
           : 0,
         skipping: nativeFocusSkippedWindowIDs,
@@ -920,7 +1004,9 @@ extension Daemon {
         source: animatesNativeFocus
           ? "native-focus-animation"
           : (nativelyActivatedWorkspace ? "native-workspace"
-            : (animatesMouseReorder ? "mouse-reorder-animation" : "desktop-sync"))
+            : (animatesMouseReorder ? "mouse-reorder-animation"
+              : (animatesMouseDrop ? "mouse-drop-animation"
+                : (animatesLifecycle ? "window-lifecycle-animation" : "desktop-sync"))))
       )
     }
     if let guardedRemovalFocus {
@@ -938,3 +1024,27 @@ extension Daemon {
   }
 
 }
+
+func mouseFrameWasResized(from initial: Rect, to actual: Rect) -> Bool {
+  abs(actual.width - initial.width) > 2 || abs(actual.height - initial.height) > 2
+}
+
+/// The active-workspace layout of `state` around `windowID`, for the drop preview.
+func mouseDropPreviewFrames(
+  around windowID: WindowID, in state: RuntimeState, viewports: [MonitorID: Rect]
+) -> [WindowID: Rect] {
+  guard let monitor = state.monitors.first(where: { monitor in
+      monitor.workspaces.contains { $0.id == monitor.activeWorkspace && $0.columns.contains { $0.windows.contains(windowID) } }
+    }),
+    let viewport = viewports[monitor.id],
+    var workspace = monitor.workspaces.first(where: { $0.id == monitor.activeWorkspace })
+  else { return [:] }
+  // The drop scrolls to keep the window in view; the preview shows that final scroll.
+  workspace.scrollOffset = workspace.targetScrollOffset
+  return Dictionary(computeLayout(
+    workspace: workspace, viewport: viewport,
+    windows: workspace.columns.flatMap(\.windows).compactMap { state.windows[$0] },
+    settings: state.layout, excludingWindowIDs: state.nativeFullscreenWindowIDs
+  ).map { ($0.windowID, $0.frame) }) { first, _ in first }
+}
+

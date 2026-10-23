@@ -144,12 +144,14 @@ workspace transitions and mouse-driven reordering.
 [animation]
 enabled = true
 duration_ms = 125
+window_proxies = true
 ```
 
 | Setting | Default | Values/type | Description |
 | --- | --- | --- | --- |
 | `enabled` | `true` | boolean | Enables visual scrolling and managed layout animations, including resizing, column/window moves, stacking, and floating transitions. |
 | `duration_ms` | `125` | integer from `0` to `2000` | Animation duration in milliseconds. Vertical workspace transitions use at least 180 ms when the usable viewport covers the physical display; otherwise they switch immediately to prevent reserved-area leaks. Workspace switches from native focus, such as a click, the Dock, or Command-Tab, are always immediate. `0` disables animation even when `enabled = true`. |
+| `window_proxies` | `true` | boolean | Draws column navigation, width and order changes, vertical workspace switches, click-to-focus scrolling and mouse reordering on a Defi overlay from captured window pictures, while each native window moves once to its target underneath, so motion never waits on slow applications. Opened and closed windows, drops after a mouse drag (with a slot placeholder under the dragged window), and workspaces activated from the Dock or Command-Tab move on the overlay too. Proxies follow a critically damped spring instead of `duration_ms` and keep their velocity when a new command retargets them. Pictures of visible windows refresh about every half second while the Mac is in use, every 4 seconds after 10 seconds without input, and fill resized proxies without stretching; the app icon is laid over a missing picture, or over an old one arriving from another workspace, and the overlay fades into the real windows. Uses Screen Recording when it is already granted and never asks for it. Without permission or on multiple displays, motion uses native Accessibility animation; with Reduce Motion it is immediate. A motion the overlay cannot draw while permission is granted, for example before the wallpaper is captured, is immediate. |
 
 ## `[overview]`
 
@@ -165,7 +167,7 @@ window_corner_radius = 12
 | Setting | Default | Values/type | Description |
 | --- | --- | --- | --- |
 | `zoom` | `0.5` | number from `0` to `0.75` | Scales workspaces and windows. Lower values show more of the neighboring workspaces. |
-| `window_previews` | `true` | boolean | Shows captured window images in cards. Set to `false` to opt out of Screen Recording entirely. |
+| `window_previews` | `true` | boolean | Shows captured window images in cards. Set to `false`, together with `[animation].window_proxies = false`, to opt out of Screen Recording entirely. |
 | `window_corner_radius` | `12` | number from `0` to `64` | Rounds window cards and their borders in the Overview. |
 
 Opening the Overview zooms the real windows out to their cards, and closing it
@@ -609,8 +611,10 @@ Multiple matching rules combine in file order:
 - last matching `initial_column_width` that specifies a value wins
 - boolean values combine with OR; later `false` cannot clear an earlier `true`
 
-Defi automatically floats sheets, dialogs, system dialogs, native floating
-panels, and standard windows identified as fixed-size or auxiliary. Floating
+Defi automatically floats sheets, dialogs, modal windows, native floating
+panels, and standard windows identified as fixed-size or auxiliary. Non-modal
+system-dialog and system-floating windows are app-drawn menus or palettes and
+stay unmanaged; `floating = true` in an app rule still manages them. Floating
 windows keep observed size and position, park with their workspace, and remain
 isolated per monitor. Use `force_tiling = true` only for windows known to behave
 correctly when resized.

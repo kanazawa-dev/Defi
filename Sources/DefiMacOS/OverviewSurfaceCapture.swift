@@ -90,6 +90,9 @@ final class OverviewSurfaceCapture {
       pendingRequests = nil
       deferredPreparation?.cancel(); deferredPreparation = nil
       if preparation != nil { return }
+      // Already captured: recapturing unchanged requests every few seconds kept the
+      // recording indicator lit while nothing moved.
+      if captures.count == requests.count { return }
       if failedRequests == requests && now - lastPreparationAt < 5 { return }
     }
     if preparation != nil || now - lastPreparationAt < 1 {
@@ -138,6 +141,8 @@ final class OverviewSurfaceCapture {
         await overviewCaptureLimiter.release()
         for request in requests {
           guard !Task.isCancelled, generation == token else { return }
+          // Held unchanged: a new or resized window must not recapture the others.
+          if captures[request.windowID]?.request == request { continue }
           guard let window = content.windows.first(where: {
             UInt64($0.windowID) == request.windowID.rawValue
               && $0.owningApplication?.bundleIdentifier == request.appID

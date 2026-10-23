@@ -327,6 +327,12 @@ final class SnapshotEngine: @unchecked Sendable {
     set { withLockedStorage { $0.lastNativeFocusedWindowID = newValue } }
   }
 
+  /// The focused window is an unmanaged app-drawn popup (a custom menu or palette).
+  var nativeFocusIsAppPopup: Bool {
+    get { withLockedStorage { $0.nativeFocusIsAppPopup } }
+    set { withLockedStorage { $0.nativeFocusIsAppPopup = newValue } }
+  }
+
   var verifiedNativeFocusedWindowID: WindowID? {
     get { withLockedStorage { $0.verifiedNativeFocusedWindowID } }
     set { withLockedStorage { $0.verifiedNativeFocusedWindowID = newValue } }
@@ -610,10 +616,6 @@ final class SnapshotEngine: @unchecked Sendable {
     } }
   }
 
-  func recordObservedFrame(_ frame: Rect?, for windowID: WindowID) {
-    withLockedStorage { $0.latestObservedFrames[windowID] = frame }
-  }
-
   var latestObservedFrames: [WindowID: Rect] {
     get { withLockedStorage { $0.latestObservedFrames } }
     set { withLockedStorage { $0.latestObservedFrames = newValue } }
@@ -720,8 +722,11 @@ final class SnapshotEngine: @unchecked Sendable {
           continue
         }
         if attempted { current.verificationAttempts += 1 }
+        // A read that never lands (stale or skipped) spends no attempt, but must not keep
+        // the desktop polled every 0.1 s forever: the watchdog takes over after a while.
+        let unattemptedTooLong = !attempted && now - current.deadline >= 3
         let delays = CGWindowDiscoveryRetryTracker.retryDelays
-        current.verification = current.verificationAttempts < delays.count
+        current.verification = !unattemptedTooLong && current.verificationAttempts < delays.count
           ? .scheduled(now + delays[current.verificationAttempts]) : .watchdog
         storage.frameCommitExpectations[id] = current
       }
@@ -1092,13 +1097,21 @@ extension SnapshotEngine {
       || window.role != kAXWindowRole
       || window.subrole != kAXStandardWindowSubrole
     {
+      // Only popup subroles hinge on modality: a modal one is a real dialog.
+      let isModal = !forceTiling && !configuredFloating
+        && isAppDrawnPopup(subrole: window.subrole, isModal: false)
+        && (preparedModalState ?? {
+          var modal: CFTypeRef?
+          AXUIElementCopyAttributeValue(element, kAXModalAttribute as CFString, &modal)
+          return modal as? Bool ?? false
+        }())
       return classifyWindow(
         role: window.role,
         subrole: window.subrole,
         appID: window.appID,
         hasCloseButton: false,
         canResize: false,
-        isModal: false,
+        isModal: isModal,
         configuredFloating: configuredFloating,
         forceTiling: forceTiling
       )
@@ -1214,6 +1227,9 @@ extension SnapshotEngine {
     requiresConfirmedWindow: Bool = false
   ) -> WindowID? {
     if let focus = discoveryMeasurementAccess?.nativeFocus { return focus(windows) }
+    // Stored once per read, on every exit: pointer focus never sees a half-done read.
+    var focusedPopup = false
+    defer { nativeFocusIsAppPopup = focusedPopup }
     let system = AXUIElementCreateSystemWide()
     let focusedApplication: CFTypeRef? = AXMessagingTimeoutAccess.shared
       .withTimeout(
@@ -1298,6 +1314,15 @@ extension SnapshotEngine {
     if let exact = elements.first(where: { CFEqual($0.value, focusedElement) }) {
       return exact.key
     }
+    focusedPopup = AXMessagingTimeoutAccess.shared.withTimeout(
+      focusSnapshotAccessibilityTimeoutSeconds, elements: [focusedElement]
+    ) {
+      var values: CFArray?
+      AXUIElementCopyMultipleAttributeValues(focusedElement,
+        [kAXSubroleAttribute, kAXModalAttribute] as CFArray, [], &values)
+      let read = values as? [Any] ?? []
+      return isAppDrawnPopup(subrole: read.first as? String, isModal: read.dropFirst().first as? Bool ?? false)
+    } ?? false
     guard
       let focusedFrame = AXMessagingTimeoutAccess.shared.withTimeout(
         focusSnapshotAccessibilityTimeoutSeconds,
@@ -1637,6 +1662,7 @@ private struct Storage {
   var lastMonitorFrames: [Rect] = []
   var pendingFrameDebtWindowIDs: Set<WindowID> = Set<WindowID>()
   var lastNativeFocusedWindowID: WindowID? = nil
+  var nativeFocusIsAppPopup = false
   var verifiedNativeFocusedWindowID: WindowID? = nil
   var lastUnconfirmedActivationTimestamp: TimeInterval?
 }

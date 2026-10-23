@@ -19,6 +19,9 @@ public struct Window: Equatable, Codable, Sendable {
   public var maximumTiledWidth: Double?
   public var maximumTiledHeight: Double?
   public var tiledSizeAcceptance: TiledSizeAcceptance?
+  /// How much wider than requested the app makes this window (a terminal snapping to
+  /// whole cells): later requests are that much narrower so it lands inside its column.
+  public var widthRounding: Double?
 
   public init(
     id: WindowID,
@@ -92,3 +95,4 @@ public struct TiledSizeAcceptance: Equatable, Codable, Sendable {
     self.accepted = accepted
   }
 }
+

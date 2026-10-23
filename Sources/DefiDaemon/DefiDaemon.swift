@@ -162,6 +162,13 @@ final class Daemon {
   var targetMismatchObservationState = WidthMismatchObservationState()
   var lastTiledSizeMismatches: [WindowID: FrameMismatch] = [:]
   var activelyResizedWindowID: WindowID?
+  /// Active workspace per monitor at the last layout, to give every switch its direction.
+  var proxyActiveWorkspaces: [MonitorID: WorkspaceID] = [:]
+  var proxyWorkspaceOrders: [MonitorID: [WorkspaceID]] = [:]
+  /// The window released by a proxied drop, until its drop layout is applied.
+  var proxyDroppedWindowID: WindowID?
+  /// The drop the overlay is previewing during a drag; applied for real on release.
+  var proxyPreviewTarget: MouseDropTarget?
   var mouseGestureInitialFrame: Rect?
   var mouseGestureScrollAnchor: WorkspaceScrollAnchor?
   var mouseGestureDisplayedOriginFrames: [WindowID: Rect] = [:]
@@ -502,7 +509,12 @@ final class Daemon {
     )
     let commandQuietPeriodElapsed =
       now - latestCommandInputTimestamp >= 0.3
-    if desktopSynchronizationIsReady(
+    // AX reads and WindowServer queries mid-motion cost the overlay frames: they wait
+    // for its landing, except while the pointer drives a gesture or the user focused
+    // another window (a click, the Dock, Command-Tab).
+    if !platform.windowProxiesMoving || mouseGestureSyncPending || liveBorderGesture
+      || (nativeFocusSyncPending && nativeFocusHasNewerHumanIntent),
+      desktopSynchronizationIsReady(
       scrollAnimationActive: !scrollAnimations.isEmpty,
       animatedWritesPending: animatedWritesPending,
       mouseGestureSyncPending: mouseGestureSyncPending,

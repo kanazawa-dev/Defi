@@ -198,6 +198,9 @@ extension Daemon {
             }
           }
         } else if !overviewParksWindows,
+          // The proxy overlay draws the outgoing slide: native windows park at once
+          // instead of moving offscreen vertically, where macOS clamps them into view.
+          !config.animation.windowProxies,
           let deltaY = outgoingWorkspaceVerticalRibbonOffset(
             workspaceID: workspace.id,
             monitorID: monitor.id,
@@ -302,6 +305,18 @@ extension Daemon {
       "frame-submit source=\(source) cg=\(commandPerformance?.generation.description ?? "none") layoutMs=\(String(format: "%.2f", layoutMS))"
     )
     platform.stageWindowBorderSelection(selectedWindowID)
+    platform.windowProxiesEnabled = config.animation.windowProxies
+    platform.windowProxyDraggedWindowID =
+      source == "mouse-reorder-animation" ? activelyResizedWindowID : nil
+    platform.windowProxyDroppedWindowID =
+      source == "mouse-drop-animation" ? proxyDroppedWindowID : nil
+    proxyDroppedWindowID = nil
+    // Incoming windows enter opposite to where the outgoing workspace leaves.
+    // Consumed either way so the history stays current; with animations off (Reduce
+    // Motion, `enabled = false` or `duration_ms = 0`) the switch is immediate.
+    let workspaceShift = consumeWorkspaceSwitchShift(source: source)
+    platform.windowProxyWorkspaceShift =
+      animationsEnabled && config.animation.durationMS > 0 ? workspaceShift : nil
     platform.apply(
       platformAssignments,
       ribbonFrames: ribbonFrames,
@@ -381,3 +396,30 @@ extension Daemon {
     return FrameAssignment(windowID: assignment.windowID, frame: frame)
   }
 }
+
+extension Daemon {
+  /// Vertical travel when a monitor's active workspace changed since the last layout,
+  /// whichever path switched it (command, Dock, Command-Tab, focus): the overlay then
+  /// always moves workspaces vertically, in their stacking order.
+  func consumeWorkspaceSwitchShift(source: String) -> Double? {
+    var shift: Double?
+    for monitor in state.monitors {
+      let previous = proxyActiveWorkspaces[monitor.id]
+      proxyActiveWorkspaces[monitor.id] = monitor.activeWorkspace
+      // The stack as it was: the workspace left may since have been removed.
+      let order = proxyWorkspaceOrders.updateValue(monitor.workspaces.map(\.id), forKey: monitor.id)
+        ?? monitor.workspaces.map(\.id)
+      guard shift == nil, !source.hasPrefix("overview"), let previous,
+        previous != monitor.activeWorkspace,
+        let height = latestMonitors.first(where: { $0.id == monitor.id })?.physicalFrame.height
+      else { continue }
+      let from = order.firstIndex(of: previous) ?? order.count
+      // A workspace created since joins the end of the stack.
+      let to = order.firstIndex(of: monitor.activeWorkspace) ?? order.count
+      // Niri's stack: moving down slides the content up.
+      shift = (to > from ? -1 : 1) * height
+    }
+    return shift
+  }
+}
+

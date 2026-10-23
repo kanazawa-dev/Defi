@@ -224,8 +224,11 @@ extension MacOSPlatform {
     guard let request else { return }
     borderStackingRefreshTask = Task { @MainActor [weak self] in
       guard let self else { return }
-      while frameCoordinator.isBusy(for: request.windowID) {
-        try? await Task.sleep(for: .milliseconds(4))
+      // The window-list read below waits on a WindowServer transaction; during an overlay
+      // motion that wait stalls the compositor, and the hidden border can wait for landing.
+      while frameCoordinator.isBusy(for: request.windowID) || RibbonProxyStore.shared.isMoving {
+        // A motion lasts hundreds of milliseconds: polling it at frame rate only wakes the main actor.
+        try? await Task.sleep(for: .milliseconds(RibbonProxyStore.shared.isMoving ? 50 : 4))
         guard !Task.isCancelled else { return }
       }
       let monitorFrames = lastMonitorFrames
@@ -312,6 +315,8 @@ extension MacOSPlatform {
     borderHiddenWindowIDs = lastHiddenWindowIDs
     borderLiveWindowID = liveWindowID
     borderStyle = WindowBorderStyle(config: config)
+    let style = borderStyle
+    NavigationActor.enqueue { RibbonProxyPresenter.shared.borderStyle = style }
     presentRefreshWindowBorders()
     if let ownedWindowID = borderManager.ownedSurfaceWindowID {
       borderBoundsProvider.probe(ownedWindowID: ownedWindowID)
@@ -535,6 +540,19 @@ extension MacOSPlatform {
     }
   }
 
+  /// Keeps visible rings on the real frames for a moment: an app can still clamp,
+  /// round, or move its window after the motion landed.
+  func settleWindowBordersOnRealFrames() {
+    borderSettleTask?.cancel()
+    borderSettleTask = Task { @MainActor [weak self] in
+      for _ in 0..<45 {
+        guard let self, !Task.isCancelled else { return }
+        refreshWindowBorderGeometry(windowIDs: borderManager.liveGeometryWindowIDs)
+        try? await Task.sleep(for: .milliseconds(33))
+      }
+    }
+  }
+
   public func presentHideWindowBorders() {
     borderManager.hide()
     syncWindowBorderSubscriptions()
@@ -590,11 +608,15 @@ extension MacOSPlatform {
 
   private func resolvedBorderFrame(for windowID: WindowID) -> Rect? {
     let windowServerDriven = windowServerDrivesBorders
+    // Between Defi's own writes, WindowServer bounds are the real frame now; the AX
+    // read-back queues behind a slow app's writes and lagged up to a second.
+    let realFrame = windowServerDriven || frameCoordinator.borderWriteIsRecent(for: windowID)
+      ? nil : borderBoundsProvider.frame(for: windowID)
     return windowBorderGeometryFrame(
       windowServerDriven: windowServerDriven,
       windowServerFrame: windowServerDriven ? borderBoundsProvider.frame(for: windowID) : nil,
       displayedFrame: windowServerDriven
-        ? nil : frameCoordinator.latestDisplayedBorderFrame(for: windowID),
+        ? nil : realFrame ?? frameCoordinator.latestDisplayedBorderFrame(for: windowID),
       plannedFrame: borderFrames.first(where: { $0.windowID == windowID })?.frame
     )
   }

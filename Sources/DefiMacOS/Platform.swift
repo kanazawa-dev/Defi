@@ -621,6 +621,12 @@ private let automaticFloatingWindowApplicationIDs: Set<String> = [
   "com.apple.quicklook.quicklookuiservice"
 ]
 
+/// App-drawn menus and palettes (Yab's action menu). AeroSpace, yabai, OmniWM and
+/// Amethyst never manage these subroles either; a modal one is a real dialog.
+func isAppDrawnPopup(subrole: String?, isModal: Bool) -> Bool {
+  !isModal && (subrole == "AXSystemDialog" || subrole == "AXSystemFloatingWindow")
+}
+
 func classifyWindow(
   role: String?,
   subrole: String?,
@@ -643,6 +649,7 @@ func classifyWindow(
     return .floating
   }
   guard subrole != nil else { return .unavailable }
+  if isAppDrawnPopup(subrole: subrole, isModal: false) { return .ignored }
   if subrole == kAXStandardWindowSubrole, hasCloseButton, canResize {
     return .tiled
   }

@@ -89,6 +89,10 @@ final class BorderOverlay {
     )
   }
 
+  func setPresentationHidden(_ hidden: Bool) {
+    for segment in segments.values { segment.setPresentationHidden(hidden) }
+  }
+
   func retarget(to windowID: WindowID, preservingBacking: Bool = false) {
     if preservingBacking {
       // Reuse only during a synchronous selection handoff, never as a hidden cache.
@@ -218,6 +222,11 @@ final class BorderOverlay {
     compactBacking()
   }
 
+  /// Takes the compacted panels off screen before the overlay is released.
+  func close() {
+    for segment in segments.values { segment.close() }
+  }
+
   func applyCompositorFallback() {
     guard visible else { return }
     for segment in segments.values where segment.frame != nil {
@@ -340,6 +349,14 @@ private final class BorderSegment {
     shapeLayer.lineCap = .butt
     shapeLayer.lineJoin = .round
     panel.contentView = rootView
+  }
+
+  func setPresentationHidden(_ hidden: Bool) {
+    // Both: AppKit rewrites a layer-backed view's layer visibility on its next update,
+    // which brought the ring back mid-drag, while the view alone reached the screen
+    // frames late, after the overlay that stood in for it had faded.
+    rootView.isHidden = hidden
+    rootView.layer?.isHidden = hidden
   }
 
   func retarget(to targetWindowNumber: Int) {
@@ -505,9 +522,16 @@ private final class BorderSegment {
     if panel.alphaValue != 0 { panel.alphaValue = 0 }
   }
 
+  func close() {
+    panel.orderOut(nil)
+    orderedIn = false
+  }
+
   func compactBacking() {
     guard frame != nil else { return }
-    orderOut()
+    // Transparent and one point large, the panel can stay ordered in: ordering it out
+    // waits for a WindowServer transaction, tens of milliseconds on the main thread.
+    makeTransparent()
     let compactBounds = CGRect(x: 0, y: 0, width: 1, height: 1)
     CATransaction.begin()
     CATransaction.setDisableActions(true)
@@ -520,6 +544,7 @@ private final class BorderSegment {
     panel.setFrame(compactBounds, display: false)
     frame = nil
     backingScale = 1
+    // Still on screen, but ordered again against its next window once reused.
     orderedIn = false
   }
 

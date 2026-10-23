@@ -57,7 +57,7 @@ public func computeLayout(
       } else if let window = windowsByID[windowID] {
         let constrainedWidth = max(
           min(width, window.maximumTiledWidth ?? width),
-          window.minimumTiledWidth ?? 0
+          effectiveMinimumTiledWidth(window.minimumTiledWidth, requested: width)
         )
         frame = Rect(
           x: x + (width - constrainedWidth) / 2,
@@ -77,6 +77,9 @@ public func computeLayout(
         windowCount: column.windows.count,
         settings: settings
       )
+      if acceptedSizes[windowID] == nil, let window = windowsByID[windowID] {
+        target = compensatingWidthRounding(target, for: window)
+      }
       if let acceptance = acceptedSizes[windowID] {
         target.x += (target.width - acceptance.accepted.width) / 2
         target.y += (target.height - acceptance.accepted.height) / 2
@@ -191,7 +194,8 @@ private func preferredColumnLayoutWidth(
   case .pixels(let width):
     requestedWidth = width
   }
-  return max(min(requestedWidth, maximumTiledWidth ?? requestedWidth), minimumTiledWidth)
+  return max(min(requestedWidth, maximumTiledWidth ?? requestedWidth),
+    effectiveMinimumTiledWidth(minimumTiledWidth, requested: requestedWidth))
 }
 
 private func acceptedTiledSizes(
@@ -214,7 +218,7 @@ private func acceptedTiledSizes(
       }
       let constrainedWidth = max(
         min(preferredWidth, window.maximumTiledWidth ?? preferredWidth),
-        window.minimumTiledWidth ?? 0
+        effectiveMinimumTiledWidth(window.minimumTiledWidth, requested: preferredWidth)
       )
       let frame = Rect(
         x: (preferredWidth - constrainedWidth) / 2,
@@ -222,14 +226,14 @@ private func acceptedTiledSizes(
         width: constrainedWidth,
         height: height
       )
-      let requested = applyGaps(
+      let requested = compensatingWidthRounding(applyGaps(
         frame,
         columnIndex: columnIndex,
         columnCount: columnCount,
         windowIndex: windowIndex,
         windowCount: column.windows.count,
         settings: settings
-      )
+      ), for: window)
       // Moving a column across a gap edge shifts the request by exactly an
       // outer/inner gap difference; the app's clamp is unchanged, so its accepted
       // size still applies. Any other change is a new request.
@@ -269,13 +273,15 @@ private func effectiveColumnLayoutWidth(
   else {
     return preferredWidth
   }
-  let minimumTiledWidth = column.windows.lazy
-    .compactMap { windowsByID[$0]?.minimumTiledWidth }
-    .max() ?? 0
+  let minimumTiledWidth = effectiveMinimumTiledWidth(
+    column.windows.lazy.compactMap { windowsByID[$0]?.minimumTiledWidth }.max(),
+    requested: preferredWidth)
   let contraction = column.windows.compactMap { acceptedSizes[$0] }
     .map { $0.requested.width - $0.accepted.width }
     .min() ?? 0
-  return max(preferredWidth - contraction, minimumTiledWidth)
+  // A window that rounds its width up does not widen its column.
+  let widening = contraction < 0 && contraction >= -tiledWidthRoundingLimit ? 0 : contraction
+  return max(preferredWidth - widening, minimumTiledWidth)
 }
 
 private func applyGaps(
@@ -306,4 +312,21 @@ private func applyGaps(
     width: max(rect.width - clampedLeft - clampedRight, 1),
     height: max(rect.height - clampedTop - clampedBottom, 1)
   )
+}
+
+/// Narrows a request by the window's learned rounding, centred in its slot.
+private func compensatingWidthRounding(_ target: Rect, for window: Window) -> Rect {
+  guard let rounding = window.widthRounding, rounding > 0, rounding < target.width else { return target }
+  return Rect(x: target.x + rounding / 2, y: target.y, width: target.width - rounding, height: target.height)
+}
+
+/// Up to this many points wider than requested is an app rounding its size, never a
+/// width constraint: the column keeps its width and the request is compensated.
+public let tiledWidthRoundingLimit = 16.0
+
+/// A learned minimum width only binds beyond rounding: a window that merely rounds a
+/// request up must not widen its column past the share it was given.
+public func effectiveMinimumTiledWidth(_ minimum: Double?, requested: Double) -> Double {
+  guard let minimum, minimum > requested + tiledWidthRoundingLimit else { return 0 }
+  return minimum
 }
