@@ -771,6 +771,171 @@ struct MouseReorderingTests {
     #expect(column.windows[column.focusedWindow] == focused)
   }
 
+  @Test
+  func `A pointer resting on a boundary keeps the previewed target`() throws {
+    var state = try makeState(windowCount: 3)
+    narrowColumns(&state)
+    let third = try targetFrame(for: WindowID(rawValue: 3), state: state)
+    let stackEdge = third.x + third.width / 4
+    let gap = try #require(dropTarget(1, stackEdge - 10, state: state))
+    guard case .column = gap, case .stack = dropTarget(1, stackEdge + 5, state: state) else {
+      Issue.record("the outer quarter targets a gap and the middle half stacks")
+      return
+    }
+    #expect(dropTarget(1, stackEdge + 5, previous: gap, state: state) == gap)
+    guard case .stack = dropTarget(1, stackEdge + 40, previous: gap, state: state) else {
+      Issue.record("a clear move past the boundary changes the target")
+      return
+    }
+  }
+
+  @Test
+  func `No target under the pointer is never held by the hysteresis`() throws {
+    var state = try makeState(windowCount: 3)
+    narrowColumns(&state)
+    let edge = viewport.x + viewport.width
+    let inside = try #require(dropTarget(1, edge - 10, state: state))
+
+    #expect(dropTarget(1, edge + 10, state: state) == nil)
+    #expect(dropTarget(1, edge + 10, previous: inside, state: state) == nil)
+  }
+
+  @Test
+  func `A pointer resting on the edge of a stacked display keeps the previewed target`() throws {
+    var state = try makeState(windowCount: 2)
+    state.attachMonitor(secondMonitorID)
+    let below = Rect(x: 0, y: viewport.height, width: viewport.width, height: viewport.height)
+    let viewports = [monitorID: viewport, secondMonitorID: below]
+    func target(_ y: Double, previous: MouseDropTarget? = nil) -> MouseDropTarget? {
+      mouseDropTarget(WindowID(rawValue: 1), pointer: (viewport.width / 2, y), previous: previous,
+        state: state, viewports: viewports, monitorFrames: viewports)
+    }
+    let above = try #require(target(viewport.height - 10))
+    guard case .display = target(viewport.height + 10) else {
+      Issue.record("past the edge, the pointer targets the display below")
+      return
+    }
+
+    #expect(target(viewport.height + 10, previous: above) == above)
+  }
+
+  @Test
+  func `A drop on another display lands at the gap under the pointer`() throws {
+    var (state, viewports) = try makeTwoDisplayState()
+    state.monitors[0].workspaces[0].columns[0].width = .pixels(300)
+    let destination = state.monitors[1].workspaces[0]
+    let frames = computeLayout(
+      workspace: destination, viewport: viewports[secondMonitorID]!,
+      windows: destination.columns.flatMap(\.windows).compactMap { state.windows[$0] },
+      settings: state.layout)
+    let third = try #require(frames.first { $0.windowID == WindowID(rawValue: 3) }?.frame)
+    let target = try #require(mouseDropTarget(
+      WindowID(rawValue: 1), pointer: (third.x + third.width / 2 + 10, 350),
+      state: state, viewports: viewports, monitorFrames: viewports))
+
+    #expect(target == .display(secondMonitorID, workspaceID: destination.id, gap: 1))
+    #expect(applyMouseDrop(WindowID(rawValue: 1), target, state: &state, viewports: viewports,
+      monitorFrames: viewports))
+    #expect(state.monitors[0].workspaces[0].columns.map { $0.windows.map(\.rawValue) } == [[2]])
+    #expect(state.monitors[1].workspaces[0].columns.map { $0.windows.map(\.rawValue) } == [[3], [1], [4]])
+    #expect(state.monitors[1].workspaces[0].columns[1].width == .pixels(300))
+    #expect(state.selectedWindowID(on: secondMonitorID) == WindowID(rawValue: 1))
+  }
+
+  @Test
+  func `A display drop preview closes the gap here and opens the slot there`() throws {
+    var (state, viewports) = try makeTwoDisplayState()
+    let target = MouseDropTarget.display(secondMonitorID, workspaceID: state.monitors[1].workspaces[0].id, gap: 1)
+    #expect(applyMouseDrop(WindowID(rawValue: 1), target, state: &state, viewports: viewports,
+      monitorFrames: viewports))
+    let after = mouseDropPreviewFrames(in: state, viewports: viewports)
+
+    let held = try #require(after[WindowID(rawValue: 1)])
+    #expect(held.x >= secondViewport.x && held.x < secondViewport.x + secondViewport.width)
+    // The window left behind fills its display.
+    let second = try #require(after[WindowID(rawValue: 2)])
+    #expect(second.x >= viewport.x && second.x + second.width <= viewport.x + viewport.width)
+    // Its new neighbour on the other display makes room after it.
+    let fourth = try #require(after[WindowID(rawValue: 4)])
+    #expect(fourth.x >= held.x + held.width)
+  }
+
+  @Test
+  func `A display drop keeps its gap when transient columns move along`() throws {
+    var (state, viewports) = try makeTwoDisplayState()
+    state.windows[WindowID(rawValue: 2)]?.transientOwnerID = WindowID(rawValue: 1)
+    state.monitors[1].workspaces[0].focusedColumn = 0
+    let target = MouseDropTarget.display(secondMonitorID, workspaceID: state.monitors[1].workspaces[0].id, gap: 2)
+
+    #expect(applyMouseDrop(WindowID(rawValue: 1), target, state: &state, viewports: viewports,
+      monitorFrames: viewports))
+    #expect(state.monitors[1].workspaces[0].columns.map { $0.windows.map(\.rawValue) } == [[3], [2], [4], [1]])
+  }
+
+  @Test
+  func `An empty display workspace takes the window at gap zero`() throws {
+    var state = try makeState(windowCount: 2)
+    state.attachMonitor(secondMonitorID)
+    let viewports = [monitorID: viewport, secondMonitorID: secondViewport]
+    let target = try #require(mouseDropTarget(
+      WindowID(rawValue: 1), pointer: (1_500, 350), state: state, viewports: viewports, monitorFrames: viewports))
+
+    #expect(target == .display(secondMonitorID, workspaceID: state.monitors[1].activeWorkspace, gap: 0))
+    #expect(applyMouseDrop(WindowID(rawValue: 1), target, state: &state, viewports: viewports,
+      monitorFrames: viewports))
+    #expect(state.monitorID(containing: WindowID(rawValue: 1)) == secondMonitorID)
+  }
+
+  @Test
+  func `A display drop onto a workspace no longer active changes nothing`() throws {
+    var (state, viewports) = try makeTwoDisplayState()
+    let target = MouseDropTarget.display(secondMonitorID, workspaceID: state.monitors[1].workspaces[0].id, gap: 1)
+    state.monitors[1].activeWorkspace = try #require(state.monitors[1].workspaces.last?.id)
+    let before = state
+
+    #expect(!applyMouseDrop(WindowID(rawValue: 1), target, state: &state, viewports: viewports,
+      monitorFrames: viewports))
+    #expect(state == before)
+  }
+
+  private let secondMonitorID = MonitorID(rawValue: 2)
+  private let secondViewport = Rect(x: 1_000, y: 0, width: 1_000, height: 700)
+
+  /// Windows 1 and 2 on the first display, 3 and 4 on the second.
+  private func makeTwoDisplayState() throws -> (RuntimeState, [MonitorID: Rect]) {
+    var state = try makeState(windowCount: 2)
+    state.attachMonitor(secondMonitorID)
+    for rawID in 3...4 {
+      try discoverWindow(
+        Window(
+          id: WindowID(rawValue: UInt64(rawID)), appID: "editor", title: "Window \(rawID)",
+          frame: Rect(x: 1_000, y: 0, width: 784, height: 684), monitorID: secondMonitorID
+        ),
+        decision: RuleDecision(followFocus: true), isNativelyFocused: true, state: &state
+      )
+    }
+    state.monitors[1].workspaces[0].scrollOffset = 0
+    state.monitors[1].workspaces[0].targetScrollOffset = 0
+    return (state, [monitorID: viewport, secondMonitorID: secondViewport])
+  }
+
+  private func narrowColumns(_ state: inout RuntimeState) {
+    // Narrow columns keep every column on the monitor.
+    for index in state.monitors[0].workspaces[0].columns.indices {
+      state.monitors[0].workspaces[0].columns[index].width = .pixels(300)
+    }
+    state.monitors[0].workspaces[0].scrollOffset = 0
+    state.monitors[0].workspaces[0].targetScrollOffset = 0
+  }
+
+  private func dropTarget(
+    _ rawID: UInt64, _ pointerX: Double, previous: MouseDropTarget? = nil, state: RuntimeState
+  ) -> MouseDropTarget? {
+    mouseDropTarget(
+      WindowID(rawValue: rawID), pointer: (pointerX, viewport.height / 2), previous: previous,
+      state: state, viewports: [monitorID: viewport])
+  }
+
   private func makeState(windowCount: Int) throws -> RuntimeState {
     let config = Config()
     var state = RuntimeState(config: config)

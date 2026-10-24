@@ -725,30 +725,37 @@ extension Daemon {
           let target = moved ? CGEvent(source: nil).flatMap { event in
             mouseDropTarget(gestureWindowID,
               pointer: (Double(event.location.x), Double(event.location.y)),
-              state: state, viewports: viewportsByMonitor)
+              previous: proxyPreviewTarget, state: state, viewports: viewportsByMonitor,
+              monitorFrames: physicalMonitorFrames)
           } : nil
           if target != proxyPreviewTarget {
             proxyPreviewTarget = target
             var preview = state
             if let target {
-              applyMouseDrop(gestureWindowID, target, state: &preview, viewports: viewportsByMonitor)
+              applyMouseDrop(gestureWindowID, target, state: &preview, viewports: viewportsByMonitor,
+                monitorFrames: physicalMonitorFrames)
             }
+            platform.recordPerformanceTrace(
+              "mouse-drop-preview window=\(gestureWindowID.rawValue) target=\(target.map { "\($0)" } ?? "none")")
             platform.presentWindowProxyPreview(
-              mouseDropPreviewFrames(around: gestureWindowID, in: preview, viewports: viewportsByMonitor),
+              mouseDropPreviewFrames(in: preview, viewports: viewportsByMonitor),
               heldWindowID: gestureWindowID)
           }
         }
       } else {
-        let previewed = proxyPreviewTarget != nil
+        let previewedTarget = proxyPreviewTarget
         proxyPreviewTarget = nil
+        platform.endWindowProxyPreview()
         var droppedOnOverlay = false
-        if previewed, let gestureWindowID,
+        if previewedTarget != nil, let gestureWindowID,
           let event = CGEvent(source: nil),
           let target = mouseDropTarget(gestureWindowID,
             pointer: (Double(event.location.x), Double(event.location.y)),
-            state: state, viewports: viewportsByMonitor)
+            previous: previewedTarget, state: state, viewports: viewportsByMonitor,
+            monitorFrames: physicalMonitorFrames)
         {
-          mouseReordered = applyMouseDrop(gestureWindowID, target, state: &state, viewports: viewportsByMonitor)
+          mouseReordered = applyMouseDrop(gestureWindowID, target, state: &state, viewports: viewportsByMonitor,
+            monitorFrames: physicalMonitorFrames)
           droppedOnOverlay = true
           platform.recordPerformanceTrace("mouse-drop window=\(gestureWindowID.rawValue) target=\(target)")
         } else if let gestureWindowID,
@@ -764,17 +771,19 @@ extension Daemon {
           )
         {
           mouseReordered = true
-          if let destination = state.monitorID(containing: gestureWindowID),
-            destination != mouseGestureScrollAnchor?.monitorID
-          {
-            mouseGestureScrollAnchor = nil
-            activeMonitorID = destination
-            nativelyFocusedMonitorID = destination
-            if nativeFocusFrameMonitorID != nil { nativeFocusFrameMonitorID = destination }
-          }
           platform.recordPerformanceTrace(
             "mouse-reorder window=\(gestureWindowID.rawValue)"
           )
+        }
+        // A drop on another display makes it the active one.
+        if mouseReordered, let gestureWindowID,
+          let destination = state.monitorID(containing: gestureWindowID),
+          destination != mouseGestureScrollAnchor?.monitorID
+        {
+          mouseGestureScrollAnchor = nil
+          activeMonitorID = destination
+          nativelyFocusedMonitorID = destination
+          if nativeFocusFrameMonitorID != nil { nativeFocusFrameMonitorID = destination }
         }
         if mouseGestureEnded,
           let gestureWindowID,
@@ -953,24 +962,5 @@ extension Daemon {
 
 func mouseFrameWasResized(from initial: Rect, to actual: Rect) -> Bool {
   abs(actual.width - initial.width) > 2 || abs(actual.height - initial.height) > 2
-}
-
-/// The active-workspace layout of `state` around `windowID`, for the drop preview.
-func mouseDropPreviewFrames(
-  around windowID: WindowID, in state: RuntimeState, viewports: [MonitorID: Rect]
-) -> [WindowID: Rect] {
-  guard let monitor = state.monitors.first(where: { monitor in
-      monitor.workspaces.contains { $0.id == monitor.activeWorkspace && $0.columns.contains { $0.windows.contains(windowID) } }
-    }),
-    let viewport = viewports[monitor.id],
-    var workspace = monitor.workspaces.first(where: { $0.id == monitor.activeWorkspace })
-  else { return [:] }
-  // The drop scrolls to keep the window in view; the preview shows that final scroll.
-  workspace.scrollOffset = workspace.targetScrollOffset
-  return Dictionary(computeLayout(
-    workspace: workspace, viewport: viewport,
-    windows: workspace.columns.flatMap(\.windows).compactMap { state.windows[$0] },
-    settings: state.layout, excludingWindowIDs: state.nativeFullscreenWindowIDs
-  ).map { ($0.windowID, $0.frame) }) { first, _ in first }
 }
 
