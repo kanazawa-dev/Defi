@@ -1322,8 +1322,8 @@ final class RibbonProxyPresenter {
 
   /// A tiled window started moving under the pointer: from here its proxy follows the
   /// pointer on the overlay, lifted, while the native window moves unseen below.
-  func carry(_ id: WindowID, stretches: Bool, windows: [RibbonProxyWindow], viewport: Rect,
-    slot: Rect?, generation submission: UInt64) {
+  func carry(_ id: WindowID, stretches: Bool, widths: ClosedRange<Double> = 240...Double.infinity,
+    windows: [RibbonProxyWindow], viewport: Rect, slot: Rect?, generation submission: UInt64) {
     guard case .idle = drag, begin(windows: windows, viewport: viewport, generation: submission,
       nativeTargets: [:], duration: ribbonProxySpringDuration, selectedWindowID: id,
       keepsOffscreen: true),
@@ -1333,13 +1333,16 @@ final class RibbonProxyPresenter {
       drag = .stretching(id)
       if let held = windows.first(where: { $0.id == id }) {
         RibbonProxyPointerTrack.shared.set(.stretch(RibbonProxyStretch(
-          id: id, layer: layer, area: layers.area, base: held.to,
+          // Its ribbon place: a fast drag has resized the native window before the overlay starts.
+          id: id, layer: layer, area: layers.area, base: slot ?? held.to, widths: widths,
           ribbon: windows.compactMap { window in
             window.id == id ? nil : windowLayers[window.id].map { ($0, window.to) }
           },
           borderStyle: borderStyle)))
       }
       layer.zPosition = 200_000
+      // The picture keeps its start width: narrowed, it spilled into the gap.
+      layer.sublayers?.first { $0.name == "content" }?.masksToBounds = true
       ribbonProxyLogger.notice("stretch id=\(id.rawValue)")
       return
     }
@@ -1900,6 +1903,8 @@ struct RibbonProxyStretch {
   let area: Rect
   /// The held window's frame when the gesture started, and every other ribbon window's.
   let base: Rect
+  /// The window's own width bounds: the app refuses to go past them.
+  let widths: ClosedRange<Double>
   let ribbon: [(CALayer, Rect)]
   let borderStyle: WindowBorderStyle?
   /// Fixed at the first event: the pointer's start, the native frame then, which edge moves.
@@ -1933,6 +1938,8 @@ final class RibbonProxyPointerTrack: @unchecked Sendable {
     DispatchQueue.main.async { MainActor.assumeIsolated { RibbonProxyPointerTicker.shared.run(on: area) } }
   }
 
+  var isStretching: Bool { lock.withLock { if case .stretch = mode { true } else { false } } }
+
   func addGuest(_ layer: CALayer, area: Rect) { lock.withLock { guests.append((layer, area)) } }
   func removeGuest(_ layer: CALayer?) { lock.withLock { guests.removeAll { $0.layer === layer } } }
 
@@ -1960,16 +1967,15 @@ final class RibbonProxyPointerTrack: @unchecked Sendable {
       mode = .carry(id: id, layer: layer, area: area, grab: offset)
     case .stretch(var stretch):
       if stretch.anchor == nil, let start = ribbonProxyNativeFrames([stretch.id])[stretch.id] {
-        stretch.anchor = (Double(point.x), start,
-          abs(start.x - stretch.base.x) > abs(start.x + start.width - stretch.base.x - stretch.base.width))
+        // The pointer is on the held edge; a fast drag may already have resized the native frame.
+        stretch.anchor = (Double(point.x), start, Double(point.x) < start.x + start.width / 2)
       }
       if let anchor = stretch.anchor {
         let delta = point.x - anchor.pointerX
-        let held = anchor.movesLeft
-          ? Rect(x: min(anchor.frame.x + delta, anchor.frame.x + anchor.frame.width - 240), y: anchor.frame.y,
-            width: max(anchor.frame.width - delta, 240), height: anchor.frame.height)
-          : Rect(x: anchor.frame.x, y: anchor.frame.y, width: max(anchor.frame.width + delta, 240),
-            height: anchor.frame.height)
+        let width = min(max(anchor.frame.width + (anchor.movesLeft ? -delta : delta),
+          stretch.widths.lowerBound), stretch.widths.upperBound)
+        let held = Rect(x: anchor.movesLeft ? anchor.frame.x + anchor.frame.width - width : anchor.frame.x,
+          y: anchor.frame.y, width: width, height: anchor.frame.height)
         let frame = ribbonProxyLocal(held, in: stretch.area)
         stretch.layer.removeAllAnimations()
         stretch.layer.frame = frame
