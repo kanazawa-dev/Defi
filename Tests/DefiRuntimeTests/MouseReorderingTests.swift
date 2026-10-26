@@ -720,7 +720,6 @@ struct MouseReorderingTests {
       dragged, pointer: (host.x + host.width / 2, host.y + host.height * 3 / 4),
       state: state, viewports: [monitorID: viewport]))
     #expect(target.row == 1)
-    #expect(target.preview.height == host.height / 2)
     #expect(stackTiledWindow(dragged, into: target, state: &state, viewports: [monitorID: viewport]))
     #expect(state.monitors[0].workspaces[0].columns.map(\.windows) == [
       [WindowID(rawValue: 2), WindowID(rawValue: 1)],
@@ -728,6 +727,31 @@ struct MouseReorderingTests {
     ])
     #expect(state.monitors[0].workspaces[0].focusedColumn == 0)
     #expect(state.monitors[0].workspaces[0].columns[0].focusedWindow == 1)
+  }
+
+  @Test
+  func `Dropping into a stack that cannot fit its minimum heights does not stack`() throws {
+    var state = try makeState(windowCount: 3)
+    state.windows[WindowID(rawValue: 1)]?.minimumTiledHeight = 400
+    state.windows[WindowID(rawValue: 2)]?.minimumTiledHeight = 500
+    let host = try targetFrame(for: WindowID(rawValue: 2), state: state)
+    #expect(mouseStackTarget(
+      WindowID(rawValue: 1), pointer: (host.x + host.width / 2, host.y + host.height * 3 / 4),
+      state: state, viewports: [monitorID: viewport]) == nil)
+  }
+
+  @Test
+  func `The stack preview keeps the dragged window's minimum height`() throws {
+    var state = try makeState(windowCount: 3)
+    state.windows[WindowID(rawValue: 1)]?.minimumTiledHeight = 450
+    let host = try targetFrame(for: WindowID(rawValue: 2), state: state)
+    let target = try #require(mouseStackTarget(
+      WindowID(rawValue: 1), pointer: (host.x + host.width / 2, host.y + host.height * 3 / 4),
+      state: state, viewports: [monitorID: viewport]))
+    #expect(stackTiledWindow(WindowID(rawValue: 1), into: target, state: &state, viewports: [monitorID: viewport]))
+    let held = try #require(mouseDropPreviewFrames(in: state, viewports: [monitorID: viewport])[WindowID(rawValue: 1)])
+    #expect(held.height >= 450)
+    #expect(abs(held.y + held.height - (host.y + host.height)) < 0.001)
   }
 
   @Test
