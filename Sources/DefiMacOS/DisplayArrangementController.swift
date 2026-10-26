@@ -263,7 +263,12 @@ public final class DisplayPointerRouter: @unchecked Sendable {
   private let warpPointer: @Sendable (CGPoint) -> CGError
 
   public convenience init() {
+    // A warp otherwise freezes physical pointer motion for 0.25 s after each crossing.
+    // The interval applies to every warp in the process; the closure keeps the source alive.
+    nonisolated(unsafe) let source = CGEventSource(stateID: .combinedSessionState)
+    source?.localEventsSuppressionInterval = 0
     self.init(warpPointer: { point in
+      withExtendedLifetime(source) {}
       let result = CGWarpMouseCursorPosition(point)
       if result == .success { CGAssociateMouseAndMouseCursorPosition(1) }
       return result
